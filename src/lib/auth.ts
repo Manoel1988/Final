@@ -1,25 +1,21 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { pool, generateUUID } from './db';
+import { pool } from './db';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
 export interface User {
   id: string;
   email: string;
-  raw_user_meta_data: {
-    permission: string;
-  };
-  role_id: string | null;
+  permission: string;
   created_at: string;
-  updated_at: string;
 }
 
-export async function signUp(email: string, password: string): Promise<User> {
+export async function signUp(email: string, password: string, permission: string = 'user'): Promise<User> {
   const connection = await pool.getConnection();
   try {
     // Check if user exists
-    const [existingUsers] = await connection.execute(
+    const [existingUsers] = await connection.query(
       'SELECT * FROM users WHERE email = ?',
       [email]
     );
@@ -30,22 +26,21 @@ export async function signUp(email: string, password: string): Promise<User> {
 
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
-    const userId = generateUUID();
-    const metadata = JSON.stringify({ permission: 'user' });
 
     // Insert new user
-    await connection.execute(
-      'INSERT INTO users (id, email, raw_user_meta_data) VALUES (?, ?, ?)',
-      [userId, email, metadata]
+    const [result] = await connection.query(
+      'INSERT INTO users (email, password, permission) VALUES (?, ?, ?)',
+      [email, hashedPassword, permission]
     );
 
     // Get the created user
-    const [users] = await connection.execute(
-      'SELECT * FROM users WHERE id = ?',
-      [userId]
+    const [users] = await connection.query(
+      'SELECT id, email, permission, created_at FROM users WHERE id = ?',
+      [(result as any).insertId]
     );
 
-    return (users as User[])[0];
+    const user = (users as any[])[0];
+    return user;
   } finally {
     connection.release();
   }
@@ -55,7 +50,7 @@ export async function signIn(email: string, password: string): Promise<{ user: U
   const connection = await pool.getConnection();
   try {
     // Get user
-    const [users] = await connection.execute(
+    const [users] = await connection.query(
       'SELECT * FROM users WHERE email = ?',
       [email]
     );
@@ -65,18 +60,22 @@ export async function signIn(email: string, password: string): Promise<{ user: U
       throw new Error('Invalid credentials');
     }
 
+    // Check password
+    const validPassword = await bcrypt.compare(password, user.password);
+    if (!validPassword) {
+      throw new Error('Invalid credentials');
+    }
+
     // Create token
     const token = jwt.sign(
-      { 
-        userId: user.id, 
-        email: user.email,
-        permission: user.raw_user_meta_data.permission 
-      },
+      { userId: user.id, email: user.email, permission: user.permission },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
 
-    return { user, token };
+    // Return user without password
+    const { password: _, ...userWithoutPassword } = user;
+    return { user: userWithoutPassword, token };
   } finally {
     connection.release();
   }
@@ -87,12 +86,12 @@ export async function verifyToken(token: string): Promise<User> {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     const connection = await pool.getConnection();
     try {
-      const [users] = await connection.execute(
-        'SELECT * FROM users WHERE id = ?',
+      const [users] = await connection.query(
+        'SELECT id, email, permission, created_at FROM users WHERE id = ?',
         [decoded.userId]
       );
 
-      const user = (users as User[])[0];
+      const user = (users as any[])[0];
       if (!user) {
         throw new Error('User not found');
       }
@@ -103,49 +102,5 @@ export async function verifyToken(token: string): Promise<User> {
     }
   } catch (error) {
     throw new Error('Invalid token');
-  }
-}
-
-export async function updateUser(
-  userId: string,
-  data: Partial<{ email: string; role_id: string; raw_user_meta_data: any }>
-): Promise<User> {
-  const connection = await pool.getConnection();
-  try {
-    const updates: string[] = [];
-    const values: any[] = [];
-
-    if (data.email) {
-      updates.push('email = ?');
-      values.push(data.email);
-    }
-    if (data.role_id) {
-      updates.push('role_id = ?');
-      values.push(data.role_id);
-    }
-    if (data.raw_user_meta_data) {
-      updates.push('raw_user_meta_data = ?');
-      values.push(JSON.stringify(data.raw_user_meta_data));
-    }
-
-    if (updates.length === 0) {
-      throw new Error('No updates provided');
-    }
-
-    values.push(userId);
-
-    await connection.execute(
-      `UPDATE users SET ${updates.join(', ')} WHERE id = ?`,
-      values
-    );
-
-    const [users] = await connection.execute(
-      'SELECT * FROM users WHERE id = ?',
-      [userId]
-    );
-
-    return (users as User[])[0];
-  } finally {
-    connection.release();
   }
 }

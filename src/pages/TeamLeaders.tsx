@@ -108,9 +108,11 @@ export function TeamLeaders() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [statuses, setStatuses] = useState<Record<string, { is_active: boolean }>>({});
 
   useEffect(() => {
     checkAdminStatus();
+    fetchStatuses();
     fetchTeamLeaders();
   }, []);
 
@@ -127,37 +129,46 @@ export function TeamLeaders() {
     }
   };
 
+  const fetchStatuses = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('company_statuses')
+        .select('id, is_active');
+
+      if (error) throw error;
+
+      const statusMap = (data || []).reduce((acc, status) => ({
+        ...acc,
+        [status.id]: { is_active: status.is_active }
+      }), {});
+
+      setStatuses(statusMap);
+    } catch (error) {
+      console.error('Erro ao buscar status:', error);
+    }
+  };
+
   const fetchTeamLeaders = async () => {
     try {
-      // First, get all active company statuses
-      const { data: statuses } = await supabase
-        .from('company_statuses')
-        .select('id')
-        .eq('is_active', true);
-
-      const activeStatusIds = (statuses || []).map(status => status.id);
-
-      // Then fetch team leaders with their companies
       const { data, error } = await supabase
         .from('team_leaders')
         .select(`
           *,
-          companies_a:companies!companies_team_leader_a_id_fkey(id, status_id),
-          companies_b:companies!companies_team_leader_b_id_fkey(id, status_id)
+          companies_a:companies!companies_team_leader_a_fkey(id, status_id),
+          companies_b:companies!companies_team_leader_b_fkey(id, status_id)
         `)
         .order('name');
-
+      
       if (error) throw error;
 
-      // Calculate squad count for each team leader
+      // Calculate active companies count for each team leader
       const leadersWithSquadCount = data?.map(leader => {
-        // Count companies where status_id is in activeStatusIds
         const activeCompaniesA = leader.companies_a?.filter(company => 
-          activeStatusIds.includes(company.status_id)
+          company.status_id && statuses[company.status_id]?.is_active
         ).length || 0;
-
+        
         const activeCompaniesB = leader.companies_b?.filter(company => 
-          activeStatusIds.includes(company.status_id)
+          company.status_id && statuses[company.status_id]?.is_active
         ).length || 0;
 
         return {
@@ -235,7 +246,7 @@ export function TeamLeaders() {
       )}
 
       {showForm && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg p-6 max-w-md w-full">
             <h2 className="text-xl font-semibold mb-4">
               {selectedTeamLeader ? 'Editar Team Leader' : 'Novo Team Leader'}
